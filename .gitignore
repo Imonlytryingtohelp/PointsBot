@@ -1,0 +1,10 @@
+*pointsbot.toml
+
+*.db
+*.pyc
+__pycache__
+
+*.html
+*.out
+*.swp
+/.vscode/
