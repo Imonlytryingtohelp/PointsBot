@@ -1,0 +1,43 @@
+# PointsBot Configuration File
+# Copy this to pointsbot_data/pointsbot.toml and fill in your values
+
+[core]
+subreddit = "your_subreddit_name"
+valid_tags = "tag1,tag2,tag3"  # optional - comma-separated tags
+
+[credentials]
+client_id = "your_reddit_client_id"
+client_secret = "your_reddit_client_secret"
+username = "your_bot_username"
+password = "your_bot_password"
+
+[links]
+feedback = "https://example.com/feedback"  # optional
+scoreboard = "https://example.com/scoreboard"  # optional
+
+[filepaths]
+database = ""  # optional - leave empty to use default
+log = ""  # optional - leave empty to use default
+
+# Define flair levels (in any order - bot will sort by points)
+# You can have as many levels as you want
+
+[[levels]]
+name = "Rookie"
+points = 0
+flair_template_id = ""  # optional - leave empty to skip
+
+[[levels]]
+name = "Veteran"
+points = 10
+flair_template_id = ""  # optional
+
+[[levels]]
+name = "Expert"
+points = 50
+flair_template_id = ""  # optional
+
+[[levels]]
+name = "Legend"
+points = 100
+flair_template_id = ""  # optional

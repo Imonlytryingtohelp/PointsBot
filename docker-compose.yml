@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  pointsbot:
+    image: ghcr.io/imonlytryingtohelp/pointsbot:latest
+    container_name: pointsbot
+    
+    # Run in the foreground so you can see logs
+    stdin_open: true
+    tty: true
+    
+    # Mount the pointsbot config directory
+    # This includes config file, database, and logs
+    volumes:
+      - ./pointsbot_data:/root/.pointsbot
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Optional: Set resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+volumes:
+  pointsbot_data:
+    driver: local
