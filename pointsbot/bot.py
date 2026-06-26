@@ -463,14 +463,13 @@ def print_welcome_message():
     print_separator_line()
     print('\nThis bot will monitor the subreddit specified in the '
           'configuration file as long as this program is running.')
+    print('\nOriginally created by GlipGlorp7, reworked and maintained by Imonlytryingtohelp_')
     print('\nAny Reddit activity that occurs while this program is not running '
-          'will be missed. You can work around this by using features '
-          'mentioned in the README.')
+          'will be missed.')
     print('\nThe output from this program can be referenced if any issues are '
           'to occur, and the relevant error message or crash report can be '
           'sent to the developer by reporting an issue on the Github page.')
-    print('\nFuture updates will hopefully resolve these issues, but for the '
-          "moment, this is what we've got to work with! :)\n")
+    print('\nGithub - https://github.com/Imonlytryingtohelp/PointsBot\n')
     print_separator_line()
 
 
