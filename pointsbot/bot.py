@@ -1,6 +1,7 @@
 import logging
 import re
 import sys
+import time
 from collections import namedtuple
 from logging.handlers import RotatingFileHandler
 
@@ -8,15 +9,68 @@ import praw
 import prawcore
 
 from . import config, database, level, reply
+from .update_checker import start_update_checker
+from . import __version__ as __version__
 
 ### Globals ###
 
-USER_AGENT = 'PointsBot (by u/GlipGlorp7)'
+USER_AGENT = 'PointsBot (by u/Imonlytryingtohelp_)'
 
 # The pattern that determines whether a post is marked as solved
 SOLVED_PATTERN = re.compile('!([Hh]elped|[Ss]olved)')
 MOD_SOLVED_PATTERN = re.compile('/([Hh]elped|[Ss]olved)')
 MOD_REMOVE_PATTERN = re.compile('/[Rr]emove[Pp]oint')
+RATE_LIMIT_DEFAULT_DELAY = 60
+
+
+def is_rate_limit_error(exc):
+    if isinstance(exc, prawcore.exceptions.TooManyRequests):
+        return True
+    if isinstance(exc, praw.exceptions.APIException):
+        return getattr(exc, 'error_type', None) == 'RATELIMIT' or 'ratelimit' in str(exc).lower()
+    return False
+
+
+def get_rate_limit_delay(exc):
+    if isinstance(exc, prawcore.exceptions.TooManyRequests):
+        response = getattr(exc, 'response', None)
+        headers = getattr(response, 'headers', {}) or {}
+        retry_after = headers.get('x-ratelimit-reset') or headers.get('retry-after')
+        if retry_after is not None:
+            try:
+                reset_time = int(retry_after)
+            except (TypeError, ValueError):
+                return RATE_LIMIT_DEFAULT_DELAY
+            current_time = int(time.time())
+            if reset_time > current_time:
+                return max(1, reset_time - current_time)
+        return RATE_LIMIT_DEFAULT_DELAY
+
+    if isinstance(exc, praw.exceptions.APIException):
+        message = str(exc).lower()
+        match = re.search(r'(\d+)\s+seconds?', message)
+        if match:
+            return max(1, int(match.group(1)))
+    return RATE_LIMIT_DEFAULT_DELAY
+
+
+def execute_with_rate_limit_retry(operation, operation_name, retries=3):
+    last_error = None
+    for attempt in range(retries):
+        try:
+            return operation()
+        except Exception as exc:
+            if not is_rate_limit_error(exc):
+                raise
+            last_error = exc
+            if attempt == retries - 1:
+                break
+            delay = get_rate_limit_delay(exc)
+            logging.warning('Reddit rate limited while %s; waiting %s seconds before retrying', operation_name, delay)
+            time.sleep(delay)
+    if last_error is not None:
+        raise last_error
+    return None
 
 
 ### Main Function ###
@@ -55,10 +109,20 @@ def run():
             is_mod = subreddit.moderator(redditor=reddit.user.me())
             logging.info(f'Is {"" if is_mod else "NOT "}moderator for subreddit')
 
+            # Start the update checker in background so mods are notified of new releases
+            try:
+                start_update_checker(reddit, cfg.subreddit, 'PointsBot', __version__)
+            except Exception:
+                logging.debug('Failed to start update checker', exc_info=True)
+
             monitor_comments(reddit, subreddit, db, levels, cfg)
 
         # Ignoring other potential exceptions for now, since we may not be able
         # to recover from them as well as from these ones
+        except prawcore.exceptions.TooManyRequests as e:
+            delay = get_rate_limit_delay(e)
+            logging.warning('Reddit rate limited while connecting; sleeping %s seconds before retrying', delay)
+            time.sleep(delay)
         except prawcore.exceptions.RequestException as e:
             logging.error('Unable to connect to Reddit')
             logging.error('Error message: %s', e)
@@ -71,97 +135,168 @@ def run():
 
 def monitor_comments(reddit, subreddit, db, levels, cfg):
     """Monitor new comments in the subreddit, looking for confirmed solutions."""
-    # Passing pause_after=0 will bypass the internal exponential delay, but have
-    # to check if any comments are returned after each query
-    for comm in subreddit.stream.comments(skip_existing=True, pause_after=0):
-        if comm is None:
-            continue
-        if comm.author == reddit.user.me():
-            logging.info('Comment was posted by this bot')
-            continue
-        if comm.author.name == reddit.user.me().name:
-            logging.info('Comment was posted by this bot name')
-            continue
-
-        logging.info('Found comment')
-        logging.debug('Comment author: "%s"', comm.author.name)
-        logging.debug('Comment text: "%s"', comm.body)
-
-        mark_as_solved, remove_point, is_mod_command = marks_as_solved(comm)
-        if mark_as_solved:
-            logging.info('Comment marks issue as solved')
-        elif remove_point:
-            logging.info('Comment removes point')
-        else:
-            # Skip this "!solved" comment
-            logging.info('Comment does not have a valid command')
-            continue
-
-        if is_mod_command:
-            logging.info('Comment was submitted by mod')
-        elif is_valid_tag(comm, cfg.tags):
-            logging.info('Comment has a valid tag')
-
-        solver, solution_comment = find_solver_and_comment(comm)
-        solver_has_already_solved = db.has_already_solved_once(solution_comment.submission, solver)
-        if not remove_point and solver_has_already_solved:
-            logging.info('User "%s" has already solved this submission once', solver.name)
-            logging.info('No additional points awarded')
-            continue
-
-        if remove_point:
-            db.soft_remove_point_for_solution(comm.submission, solver, comm.author, comm)
-            logging.info('Removed point for user "%s"', solver.name)
-        else:
-            logging.info('Submission solved')
-            logging.debug('Solution comment:')
-            logging.debug('Author: %s', solution_comment.author.name)
-            logging.debug('Body:   %s', solution_comment.body)
-            db.add_point_for_solution(comm.submission, solver, solution_comment, comm.author, comm)
-            logging.info('Added point for user "%s"', solver.name)
-
-        points = db.get_points(solver)
-        logging.info('Total points for user "%s": %d', solver.name, points)
-        if points > 0:
-            level_info = level.user_level_info(points, levels)
-        else:
-            level_info = None
-
-        # Reply to the comment marking the submission as solved
-        reply_body = reply.make(solver,
-                                points,
-                                level_info,
-                                feedback_url=cfg.feedback_url,
-                                scoreboard_url=cfg.scoreboard_url,
-                                is_add=not remove_point)
+    while True:
         try:
-            comm.reply(reply_body)
-            logging.info('Replied to the comment')
-            logging.debug('Reply body: %s', reply_body)
-        except praw.exceptions.APIException as e:
-            logging.error('Unable to reply to comment: %s', e)
-            if remove_point:
-                db.add_back_point_for_solution(comm.submission, solver)
-                logging.error('Re-added point that was just removed from user "%s"', solver.name)
-            else:
-                db.remove_point_and_delete_solution(comm.submission, solver)
-                logging.error('Removed point that was just awarded to user "%s"', solver.name)
-            logging.error('Skipping comment')
-            continue
+            for comm in subreddit.stream.comments(skip_existing=True, pause_after=0):
+                if comm is None:
+                    continue
+                if comm.author == reddit.user.me():
+                    logging.info('Comment was posted by this bot')
+                    continue
+                if comm.author.name == reddit.user.me().name:
+                    logging.info('Comment was posted by this bot name')
+                    continue
 
-        # Check if (non-mod) user flair should be updated to new level
-        if level_info and level_info.current and level_info.current.points == points:
-            lvl = level_info.current
-            logging.info('User reached level: %s', lvl.name)
-            if not subreddit.moderator(redditor=solver):
-                logging.info('User is not mod; setting flair')
-                logging.info('Flair text: %s', lvl.name)
-                logging.info('Flair template ID: %s', lvl.flair_template_id)
-                subreddit.flair.set(solver,
-                                    text=lvl.name,
-                                    flair_template_id=lvl.flair_template_id)
-            else:
-                logging.info('Solver is mod; don\'t alter flair')
+                logging.info('Found comment')
+                logging.debug('Comment author: "%s"', comm.author.name)
+                logging.debug('Comment text: "%s"', comm.body)
+
+                if is_guide_award_comment(comm):
+                    guide_author = comm.submission.author
+                    if guide_author is None:
+                        logging.warning('Guide submission author unknown; skipping guide award')
+                        continue
+                    if guide_author.name == comm.author.name:
+                        logging.info('Guide comment author is also submission author; skipping guide award')
+                        continue
+                    if db.has_guide_award_for_submission(comm.submission, comm.author):
+                        logging.info('Guide award already recorded for user "%s" on this submission', comm.author.name)
+                        continue
+
+                    logging.info('Guide top-level acknowledgment found; awarding point to guide author "%s"', guide_author.name)
+                    rowcount = db.add_guide_award_for_submission(comm.submission, guide_author, comm.author, comm)
+                    if rowcount == 0:
+                        logging.info('Guide award was not added, likely duplicate')
+                        continue
+
+                    points = db.get_points(guide_author)
+                    logging.info('Total points for guide author "%s": %d', guide_author.name, points)
+                    if points > 0:
+                        level_info = level.user_level_info(points, levels)
+                    else:
+                        level_info = None
+
+                    reply_body = reply.make(guide_author,
+                                            points,
+                                            level_info,
+                                            feedback_url=cfg.feedback_url,
+                                            scoreboard_url=cfg.scoreboard_url,
+                                            is_add=True,
+                                            header=reply.guide_header())
+                    try:
+                        execute_with_rate_limit_retry(lambda: comm.reply(reply_body), 'replying to guide acknowledgment comment')
+                        logging.info('Replied to the guide acknowledgment comment')
+                        logging.debug('Reply body: %s', reply_body)
+                    except praw.exceptions.APIException as e:
+                        logging.error('Unable to reply to guide acknowledgment comment: %s', e)
+                        # Do not remove the awarded point in this case; the award was still recorded.
+
+                    if level_info and level_info.current and level_info.current.points == points:
+                        lvl = level_info.current
+                        logging.info('Guide author reached level: %s', lvl.name)
+                        is_mod = execute_with_rate_limit_retry(
+                            lambda: subreddit.moderator(redditor=guide_author),
+                            'checking guide author moderator status')
+                        if not is_mod:
+                            logging.info('Guide author is not mod; setting flair')
+                            logging.info('Flair text: %s', lvl.name)
+                            logging.info('Flair template ID: %s', lvl.flair_template_id)
+                            execute_with_rate_limit_retry(
+                                lambda: subreddit.flair.set(guide_author,
+                                                            text=lvl.name,
+                                                            flair_template_id=lvl.flair_template_id),
+                                'setting flair for guide author')
+                        else:
+                            logging.info('Guide author is mod; don\'t alter flair')
+                    continue
+
+                mark_as_solved, remove_point, is_mod_command = marks_as_solved(comm)
+                if mark_as_solved:
+                    logging.info('Comment marks issue as solved')
+                elif remove_point:
+                    logging.info('Comment removes point')
+                else:
+                    # Skip this "!solved" comment
+                    logging.info('Comment does not have a valid command')
+                    continue
+
+                if is_mod_command:
+                    logging.info('Comment was submitted by mod')
+                elif is_valid_tag(comm, cfg.tags):
+                    logging.info('Comment has a valid tag')
+
+                solver, solution_comment = find_solver_and_comment(comm)
+                solver_has_already_solved = db.has_already_solved_once(solution_comment.submission, solver)
+                if not remove_point and solver_has_already_solved:
+                    logging.info('User "%s" has already solved this submission once', solver.name)
+                    logging.info('No additional points awarded')
+                    continue
+
+                if remove_point:
+                    db.soft_remove_point_for_solution(comm.submission, solver, comm.author, comm)
+                    logging.info('Removed point for user "%s"', solver.name)
+                else:
+                    logging.info('Submission solved')
+                    logging.debug('Solution comment:')
+                    logging.debug('Author: %s', solution_comment.author.name)
+                    logging.debug('Body:   %s', solution_comment.body)
+                    db.add_point_for_solution(comm.submission, solver, solution_comment, comm.author, comm)
+                    logging.info('Added point for user "%s"', solver.name)
+
+                points = db.get_points(solver)
+                logging.info('Total points for user "%s": %d', solver.name, points)
+                if points > 0:
+                    level_info = level.user_level_info(points, levels)
+                else:
+                    level_info = None
+
+                # Reply to the comment marking the submission as solved
+                reply_body = reply.make(solver,
+                                        points,
+                                        level_info,
+                                        feedback_url=cfg.feedback_url,
+                                        scoreboard_url=cfg.scoreboard_url,
+                                        is_add=not remove_point)
+                try:
+                    execute_with_rate_limit_retry(lambda: comm.reply(reply_body), 'replying to solved comment')
+                    logging.info('Replied to the comment')
+                    logging.debug('Reply body: %s', reply_body)
+                except praw.exceptions.APIException as e:
+                    logging.error('Unable to reply to comment: %s', e)
+                    if remove_point:
+                        db.add_back_point_for_solution(comm.submission, solver)
+                        logging.error('Re-added point that was just removed from user "%s"', solver.name)
+                    else:
+                        db.remove_point_and_delete_solution(comm.submission, solver)
+                        logging.error('Removed point that was just awarded to user "%s"', solver.name)
+                    logging.error('Skipping comment')
+                    continue
+
+                # Check if (non-mod) user flair should be updated to new level
+                if level_info and level_info.current and level_info.current.points == points:
+                    lvl = level_info.current
+                    logging.info('User reached level: %s', lvl.name)
+                    is_mod = execute_with_rate_limit_retry(
+                        lambda: subreddit.moderator(redditor=solver),
+                        'checking solver moderator status')
+                    if not is_mod:
+                        logging.info('User is not mod; setting flair')
+                        logging.info('Flair text: %s', lvl.name)
+                        logging.info('Flair template ID: %s', lvl.flair_template_id)
+                        execute_with_rate_limit_retry(
+                            lambda: subreddit.flair.set(solver,
+                                                        text=lvl.name,
+                                                        flair_template_id=lvl.flair_template_id),
+                            'setting flair for solver')
+                    else:
+                        logging.info('Solver is mod; don\'t alter flair')
+        except Exception as e:
+            if not is_rate_limit_error(e):
+                raise
+            delay = get_rate_limit_delay(e)
+            logging.warning('Reddit rate limited while streaming comments; sleeping %s seconds before retrying', delay)
+            time.sleep(delay)
+            continue
 
 
 ### Reddit Comment Functions ###
@@ -273,6 +408,27 @@ def marks_as_solved(comment):
 
 def is_mod_comment(comment):
     return comment.subreddit.moderator(redditor=comment.author)
+
+
+def is_guide_post(submission):
+    title = submission.title
+    return title is not None and '[guide]' in title.lower()
+
+
+def is_guide_award_comment(comment):
+    if comment is None or comment.author is None or comment.submission is None:
+        return False
+    if not comment.is_root:
+        return False
+    if not SOLVED_PATTERN.search(comment.body):
+        return False
+    if not is_guide_post(comment.submission):
+        return False
+    if comment.submission.author is None:
+        return False
+    if comment.submission.author.name == comment.author.name:
+        return False
+    return True
 
 
 def is_valid_tag(solved_comment, valid_tags):

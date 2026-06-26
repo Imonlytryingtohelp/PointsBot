@@ -98,7 +98,7 @@ class DatabaseVersion:
 class Database:
 
     # TODO why store this separately; could compute from SCHEMA_VERSION_STATEMENTS
-    LATEST_VERSION = DatabaseVersion(0, 2, 1)
+    LATEST_VERSION = DatabaseVersion(0, 2, 2)
 
     # TODO now that I'm separating these statements by version, I could probably make these
     # scripts instead of lists of individual statements...
@@ -202,6 +202,19 @@ class Database:
            '''
            ALTER TABLE temp_submission RENAME TO submission
            '''
+        ],
+        DatabaseVersion(0, 2, 2): [
+            '''
+            CREATE TABLE IF NOT EXISTS guide_award (
+                submission_rowid INTEGER NOT NULL,
+                trigger_author_rowid INTEGER NOT NULL,
+                comment_rowid INTEGER NOT NULL,
+                FOREIGN KEY (submission_rowid) REFERENCES submission (rowid) ON DELETE CASCADE,
+                FOREIGN KEY (trigger_author_rowid) REFERENCES redditor (rowid) ON DELETE CASCADE,
+                FOREIGN KEY (comment_rowid) REFERENCES comment (rowid) ON DELETE CASCADE,
+                UNIQUE (submission_rowid, trigger_author_rowid)
+            )
+            '''
         ]
     }
 
@@ -298,6 +311,53 @@ class Database:
         self.cursor.execute(select_stmt, {'submission_id': submission.id, 'author_id': solver.id})
         row = self.cursor.fetchone()
         return row and row['num_solutions'] > 0
+
+    @transaction
+    def has_guide_award_for_submission(self, submission, trigger_author):
+        self._add_submission(submission)
+        self.add_redditor(trigger_author)
+        params = {
+            'submission_rowid': self._get_submission_rowid(submission),
+            'trigger_author_rowid': self._get_redditor_rowid(trigger_author),
+        }
+        select_stmt = '''
+            SELECT count(*) AS award_count
+            FROM guide_award
+            WHERE submission_rowid = :submission_rowid
+                AND trigger_author_rowid = :trigger_author_rowid
+        '''
+        self.cursor.execute(select_stmt, params)
+        row = self.cursor.fetchone()
+        return row and row['award_count'] > 0
+
+    @transaction
+    def add_guide_award_for_submission(self, submission, guide_author, trigger_author, trigger_comment):
+        if not self._is_comment_already_saved(trigger_comment):
+            self._add_comment(trigger_comment, trigger_author)
+        self._add_submission(submission)
+        self.add_redditor(trigger_author)
+        self.add_redditor(guide_author)
+        rowcount = self._add_guide_award(submission, trigger_author, trigger_comment)
+        if rowcount > 0:
+            self._update_points(guide_author, 1)
+        return rowcount
+
+    @transaction
+    def _add_guide_award(self, submission, trigger_author, comment):
+        submission_rowid = self._get_submission_rowid(submission)
+        trigger_author_rowid = self._get_redditor_rowid(trigger_author)
+        comment_rowid = self._get_comment_rowid(comment)
+        params = {
+            'submission_rowid': submission_rowid,
+            'trigger_author_rowid': trigger_author_rowid,
+            'comment_rowid': comment_rowid,
+        }
+        insert_stmt = '''
+            INSERT OR IGNORE INTO guide_award (submission_rowid, trigger_author_rowid, comment_rowid)
+            VALUES (:submission_rowid, :trigger_author_rowid, :comment_rowid)
+        '''
+        self.cursor.execute(insert_stmt, params)
+        return self.cursor.rowcount
 
     def add_point_for_solution(self, submission, solver, solution_comment, chooser, chosen_by_comment):
         self._add_submission(submission)

@@ -21,8 +21,10 @@ EXCESS_SYMBOL_TITLE = 'a star'   # Used in comment body
 ### Main Functions ###
 
 
-def make(redditor, points, level_info, feedback_url=None, scoreboard_url=None, is_add=True):
-    if is_add:
+def make(redditor, points, level_info, feedback_url=None, scoreboard_url=None, is_add=True, header=None):
+    if header is not None:
+        paras = [header]
+    elif is_add:
         paras = [solved_header()]
     else:
         paras = [remove_header()]
@@ -148,6 +150,10 @@ def progress_bar(points, level_info):
 def divider():
     '''A single dividing line in Markdown.'''
     return '***'
+
+
+def guide_header():
+    return 'Thanks! This [Guide] post was acknowledged.'
 
 
 def footer(feedback_url=None, scoreboard_url=None):
