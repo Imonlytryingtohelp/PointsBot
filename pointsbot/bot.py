@@ -159,7 +159,8 @@ def monitor_comments(reddit, subreddit, db, levels, cfg):
                     if guide_author.name == comm.author.name:
                         logging.info('Guide comment author is also submission author; skipping guide award')
                         continue
-                    if db.has_guide_award_for_submission(comm.submission, comm.author):
+                    is_mod = is_mod_comment(comm)
+                    if not is_mod and db.has_guide_award_for_submission(comm.submission, comm.author):
                         logging.info('Guide award already recorded for user "%s" on this submission', comm.author.name)
                         continue
 
@@ -420,15 +421,15 @@ def is_guide_award_comment(comment):
         return False
     if not comment.is_root:
         return False
-    if not SOLVED_PATTERN.search(comment.body):
-        return False
     if not is_guide_post(comment.submission):
         return False
     if comment.submission.author is None:
         return False
     if comment.submission.author.name == comment.author.name:
         return False
-    return True
+    if is_mod_comment(comment):
+        return MOD_SOLVED_PATTERN.search(comment.body) is not None
+    return SOLVED_PATTERN.search(comment.body) is not None
 
 
 def is_valid_tag(solved_comment, valid_tags):

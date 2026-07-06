@@ -98,7 +98,7 @@ class DatabaseVersion:
 class Database:
 
     # TODO why store this separately; could compute from SCHEMA_VERSION_STATEMENTS
-    LATEST_VERSION = DatabaseVersion(0, 2, 2)
+    LATEST_VERSION = DatabaseVersion(0, 2, 3)
 
     # TODO now that I'm separating these statements by version, I could probably make these
     # scripts instead of lists of individual statements...
@@ -208,12 +208,34 @@ class Database:
             CREATE TABLE IF NOT EXISTS guide_award (
                 submission_rowid INTEGER NOT NULL,
                 trigger_author_rowid INTEGER NOT NULL,
-                comment_rowid INTEGER NOT NULL,
+                comment_rowid INTEGER NOT NULL UNIQUE,
                 FOREIGN KEY (submission_rowid) REFERENCES submission (rowid) ON DELETE CASCADE,
                 FOREIGN KEY (trigger_author_rowid) REFERENCES redditor (rowid) ON DELETE CASCADE,
-                FOREIGN KEY (comment_rowid) REFERENCES comment (rowid) ON DELETE CASCADE,
-                UNIQUE (submission_rowid, trigger_author_rowid)
+                FOREIGN KEY (comment_rowid) REFERENCES comment (rowid) ON DELETE CASCADE
             )
+            '''
+        ],
+        DatabaseVersion(0, 2, 3): [
+            '''
+            CREATE TABLE IF NOT EXISTS temp_guide_award (
+                submission_rowid INTEGER NOT NULL,
+                trigger_author_rowid INTEGER NOT NULL,
+                comment_rowid INTEGER NOT NULL UNIQUE,
+                FOREIGN KEY (submission_rowid) REFERENCES submission (rowid) ON DELETE CASCADE,
+                FOREIGN KEY (trigger_author_rowid) REFERENCES redditor (rowid) ON DELETE CASCADE,
+                FOREIGN KEY (comment_rowid) REFERENCES comment (rowid) ON DELETE CASCADE
+            )
+            ''',
+            '''
+            INSERT OR IGNORE INTO temp_guide_award (submission_rowid, trigger_author_rowid, comment_rowid)
+            SELECT submission_rowid, trigger_author_rowid, comment_rowid
+            FROM guide_award
+            ''',
+            '''
+            DROP TABLE guide_award
+            ''',
+            '''
+            ALTER TABLE temp_guide_award RENAME TO guide_award
             '''
         ]
     }

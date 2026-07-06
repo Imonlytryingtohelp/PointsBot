@@ -4,8 +4,12 @@ All notable changes to this project are documented in this file.
 
 The changelog only lists notable changes for each version, since 1.6.0.
 
+## [1.6.2]
+- Fixed: Moderator `/helped` and `/solved` now award guide points correctly, while moderator `!helped` no longer triggers a guide award.
+
 ## [1.6.1]
 - Changed: Welcome message displayed in console on bot run - Now shows correct bot features and github page.  
+
 
 ## [1.6.0]
 - Added: Guide award support - award points when a top-level OP comment

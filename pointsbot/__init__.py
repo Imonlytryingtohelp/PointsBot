@@ -3,6 +3,6 @@
 Expose `run()` and package version.
 """
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 from .bot import run
